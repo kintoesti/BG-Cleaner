@@ -2,223 +2,126 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<title>Photopea : fond magenta → transparent → PNG</title>
+<title>Fond magenta → transparent → PNG</title>
 <style>
-  body     { font-family: system-ui, sans-serif; margin: 16px; }
-  #barre   { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
-  #log     { color: #333; font-size: 14px; font-weight: 600; }
-  #journal { background: #101410; color: #9f9; font: 12px/1.5 Consolas, monospace;
-             height: 130px; overflow-y: auto; padding: 6px 10px; margin: 10px 0;
-             white-space: pre-wrap; }
-  iframe   { width: 100%; height: 66vh; border: 1px solid #ccc; }
+  body   { font-family: system-ui, sans-serif; margin: 16px; max-width: 1100px; }
+  .barre { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+  #galerie { display: flex; flex-wrap: wrap; gap: 14px; }
+  .carte { width: 240px; }
+  .apercu { height: 240px; border: 1px solid #ccc; display: flex; align-items: center;
+            justify-content: center;
+            background: repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 0 0/20px 20px; }
+  .apercu img { max-width: 100%; max-height: 100%; }
+  .nom   { font-size: 12px; color: #333; overflow: hidden; white-space: nowrap;
+           text-overflow: ellipsis; }
+  .ok::after { content: " ✔ téléchargé"; color: green; font-weight: 600; }
 </style>
 </head>
 <body>
 
-<h2 style="margin:0 0 10px">Photopea — fond magenta #FF00FF → transparent → PNG</h2>
+<h2>Fond magenta #FF00FF → transparent → PNG</h2>
+<p>Tout se passe dans votre navigateur, sans serveur ni Photopea.</p>
 
-<div id="barre">
+<div class="barre">
   <input type="file" id="fichiers" multiple accept="image/*">
-  <button id="test">Tester la connexion</button>
-  <span id="log">Chargement de Photopea…</span>
+  <label>Tolérance <input type="number" id="tol" value="60" min="0" max="120" style="width:4em"></label>
+  <label><input type="checkbox" id="despill" checked> Corriger la frange des bords</label>
+  <button id="relancer">Relancer le traitement</button>
+  <span id="log"></span>
 </div>
 
-<div id="journal"></div>
-<iframe id="photopea" src="https://www.photopea.com"></iframe>
+<div id="galerie"></div>
 
 <script>
-/* ================== RÉGLAGES ================== */
-const TOLERANCE = 32;   // 8–16 : PNG net | 48–64 : JPEG
-const EXPAND_PX = 1;    // mange la frange magenta (0 = off)
-/* =============================================== */
+const input     = document.getElementById("fichiers");
+const tolEl     = document.getElementById("tol");
+const despillEl = document.getElementById("despill");
+const logEl     = document.getElementById("log");
+const galerie   = document.getElementById("galerie");
 
-const iframe  = document.getElementById("photopea");
-const logEl   = document.getElementById("log");
-const journal = document.getElementById("journal");
-const input   = document.getElementById("fichiers");
+let originaux = [];
 
-let etat = "boot";   // boot → pret → ouverture → traitement
-let files = [], filesEnAttente = [];
-let fileCourant = null, nomSortie = "";
-let chrono = null, nbOK = 0, nbKO = 0;
-
-function j(texte, couleur) {
-  const d = document.createElement("div");
-  d.textContent = "[" + new Date().toLocaleTimeString() + "] " + texte;
-  if (couleur) d.style.color = couleur;
-  journal.appendChild(d);
-  journal.scrollTop = journal.scrollHeight;
-}
-function statut(t) { logEl.textContent = t; }
-function envoyer(code) {
-  iframe.contentWindow.postMessage(JSON.stringify({ script: code }), "*");
-}
-
-/* ---------- réception des messages de Photopea ---------- */
-window.addEventListener("message", (e) => {
-  if (e.source !== iframe.contentWindow) return;
-
-  if (e.data instanceof ArrayBuffer) {            // le PNG demandé !
-    clearTimeout(chrono);
-    nbOK++;
-    telecharger(e.data, nomSortie);
-    j("✔ PNG téléchargé : " + nomSortie, "#6f6");
-    etat = "pret"; fileCourant = null;
-    statut("Succès — fichier suivant…");
-    setTimeout(traiteSuivant, 500);
-    return;
+input.addEventListener("change", async () => {
+  originaux = [];
+  galerie.innerHTML = "";
+  for (const f of input.files) {
+    const img = new Image();
+    img.src = await lire(f);
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+    originaux.push({ nom: f.name.replace(/\.[^.]+$/, ""), image: img });
   }
-  if (typeof e.data !== "string") return;
-
-  if (e.data.indexOf("NDOCS:") === 0) {           // réponse de notre sonde
-    const n = parseInt(e.data.slice(6), 10) || 0;
-    if (etat === "boot") {
-      etat = "pret";
-      statut("Prêt ✔ — choisissez une ou plusieurs images.");
-      j("Photopea est prêt.", "#6f6");
-      if (filesEnAttente.length) { files = filesEnAttente; filesEnAttente = []; traiteSuivant(); }
-    } else if (etat === "ouverture" && n > 0) {
-      j("Image ouverte dans Photopea.", "#6f6");
-      lancerTraitement();
-    }
-    return;
-  }
-  if (e.data === "done") return;                  // signal générique, ignoré
-
-  const err = e.data.indexOf("ERR") === 0;        // tout autre message s'affiche
-  j("Photopea : " + e.data, err ? "#f66" : "#888");
+  traiterTout();
 });
 
-/* ---------- sélection des fichiers ---------- */
-input.addEventListener("change", () => {
-  const n = [...input.files];
-  input.value = "";
-  if (etat !== "pret") {
-    filesEnAttente = filesEnAttente.concat(n);
-    statut("Fichiers mis en attente — Photopea n'a pas fini de charger.");
-    return;
-  }
-  files = n;
-  traiteSuivant();
+document.getElementById("relancer").addEventListener("click", () => {
+  if (originaux.length) traiterTout();
 });
 
-function traiteSuivant() {
-  if (etat !== "pret") return;
-  if (!files.length) { statut("Terminé — " + nbOK + " réussi(s), " + nbKO + " échec(s)."); return; }
-
-  const file = files.shift();
-  fileCourant = file;
-  nomSortie = file.name.replace(/\.[^.]+$/, "") + "-transparent.png";
-
-  etat = "ouverture";
-  statut("Ouverture de " + file.name + "…");
-  j("→ Envoi de « " + file.name + " » (" + Math.round(file.size/1024) + " Ko)…");
-
-  clearTimeout(chrono);
-  chrono = setTimeout(() => echec("l'image ne s'est jamais ouverte (délai dépassé)"), 90000);
-
-  const reader = new FileReader();
-  reader.onload = () => {
-    envoyer(
-      "try{if(app.documents.length){app.activeDocument.close(SaveOptions.DONOTSAVECHANGES);}}catch(e){};" +
-      "app.open(" + JSON.stringify(reader.result) + ");"
-    );
-  };
-  reader.readAsDataURL(file);
+function lire(f) {
+  return new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f); });
 }
 
-/* ---------- détourage (envoyé seulement quand l'image EST ouverte) ---------- */
-function lancerTraitement() {
-  etat = "traitement";
-  statut("Détourage…");
-  clearTimeout(chrono);
-  chrono = setTimeout(() => echec("délai dépassé pendant le détourage / l'export"), 60000);
+function traiterTout() {
+  const t = parseInt(tolEl.value, 10) || 0;
+  logEl.textContent = "Traitement…";
+  originaux.forEach((o, i) => setTimeout(() => traiter(o, i, t), i * 400));
+}
 
-  envoyer(`
-    (function(){
-      function dire(m){ app.echoToOE(m); }
-      try {
-        var doc = app.activeDocument;
-        if (!doc) { dire("ERR: aucun document ouvert"); return; }
+function traiter(o, index, t) {
+  const c = document.createElement("canvas");
+  c.width  = o.image.naturalWidth;
+  c.height = o.image.naturalHeight;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(o.image, 0, 0);
 
-        try {
-          var lay = doc.activeLayer;
-          if (lay.isBackground) { lay.isBackground = false; }
-        } catch(e) {}
+  const im = ctx.getImageData(0, 0, c.width, c.height);
+  const d  = im.data;
+  const rMin = 255 - t, gMax = t;
 
-        doc.selection.select([[0,0],[1,0],[1,1],[0,1]]);
-        try { doc.selection.similar(${TOLERANCE}); }
-        catch(e1) {
-          try { doc.selection.grow(${TOLERANCE}); }
-          catch(e2) { dire("ERR: selection.similar indisponible (" + e2.message + ")"); return; }
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i] >= rMin && d[i+2] >= rMin && d[i+1] <= gMax) d[i+3] = 0;
+  }
+
+  if (despillEl.checked) {
+    const w = c.width, h = c.height;
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = (y * w + x) * 4;
+        if (d[i+3] === 0) continue;
+        const bord =
+          d[i - 4     + 3] === 0 || d[i + 4     + 3] === 0 ||
+          d[i - w * 4 + 3] === 0 || d[i + w * 4 + 3] === 0;
+        if (bord && d[i] > d[i+1] + 30 && d[i+2] > d[i+1] + 30) {
+          const g = d[i+1];
+          d[i]   = g + (d[i]   - g) * 0.2;
+          d[i+2] = g + (d[i+2] - g) * 0.2;
         }
-
-        try {
-          var d = new ActionDescriptor(), r = new ActionReference();
-          r.putProperty(charIDToTypeID("Chnl"), charIDToTypeID("fsel"));
-          d.putReference(charIDToTypeID("null"), r);
-          d.putUnitDouble(charIDToTypeID("By  "), charIDToTypeID("#Pxl"), ${EXPAND_PX});
-          executeAction(charIDToTypeID("Expn"), d, DialogModes.NO);
-        } catch(e) {}
-
-        doc.selection.clear();
-        doc.selection.deselect();
-
-        doc.saveToOE(${JSON.stringify(nomSortie)});
-        dire("OK: magenta supprimé, export du PNG en cours…");
-      } catch(e) {
-        dire("ERR: " + (e && e.message ? e.message : e));
       }
-    })();
-  `);
-}
-
-function echec(pourquoi) {
-  clearTimeout(chrono);
-  nbKO++;
-  j("✘ ÉCHEC (" + (fileCourant ? fileCourant.name : "?") + ") : " + pourquoi, "#f66");
-  statut("Échec — passage au fichier suivant…");
-  envoyer("try{app.activeDocument.close(SaveOptions.DONOTSAVECHANGES);}catch(e){}");
-  etat = "pret"; fileCourant = null;
-  setTimeout(traiteSuivant, 800);
-}
-
-/* ---------- bouton test ---------- */
-document.getElementById("test").addEventListener("click", () => {
-  envoyer("app.echoToOE('CONNEXION-OK');");
-  j("Ping envoyé — la réponse doit apparaître ci-dessous en quelques secondes…");
-});
-
-function telecharger(buffer, nom) {
-  const blob = new Blob([buffer], { type: "image/png" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = nom;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-}
-
-/* ---------- sonde : détecte que Photopea répond et que l'image est ouverte ---------- */
-setInterval(() => {
-  if (etat === "boot" || etat === "ouverture") {
-    envoyer("app.echoToOE('NDOCS:' + (app.documents ? app.documents.length : 0));");
+    }
   }
-}, 1500);
 
-/* ---------- avertissement si Photopea ne répond jamais ---------- */
-setTimeout(() => {
-  if (etat === "boot") {
-    j("⚠ Aucune réponse de Photopea après 90 s.", "#fc6");
-    j("  Vérifiez : connexion internet, bloqueur de publicités, réseau d'entreprise.", "#fc6");
-    j("  Cliquez « Tester la connexion » : une réponse doit apparaître ici.", "#fc6");
+  ctx.putImageData(im, 0, 0);
+
+  let carte = document.getElementById("c" + index);
+  if (!carte) {
+    carte = document.createElement("div");
+    carte.className = "carte"; carte.id = "c" + index;
+    carte.innerHTML = '<div class="apercu"><img></div><div class="nom"></div>';
+    galerie.appendChild(carte);
   }
-}, 90000);
+  carte.querySelector("img").src = c.toDataURL("image/png");
+  carte.querySelector(".nom").textContent = o.nom + ".png";
 
-iframe.addEventListener("load", () => {
-  j("Iframe chargée — Photopea s'initialise (30 à 60 s au premier lancement)…");
-});
+  c.toBlob(blob => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = o.nom + "-transparent.png";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    carte.querySelector(".nom").classList.add("ok");
+    logEl.textContent = "Terminé ✔";
+  }, "image/png");
+}
 </script>
 </body>
 </html>
