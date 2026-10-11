@@ -29,6 +29,10 @@
     <option value="magenta">Fond magenta #FF00FF</option>
   </select>
   <label>Tolérance <input type="number" id="tol" value="80" min="0" max="150" style="width:4em"></label>
+  <label title="Contour de l'image ignoré : contourne le fin liseré gris parfois généré par l'IA">
+    Bord à ignorer <input type="number" id="skip" value="4" min="0" max="30" style="width:3.5em"> px</label>
+  <label title="Retire aussi le blanc enfermé dans le sujet : cadres, yeux, trous…">
+    <input type="checkbox" id="trous"> Blancs intérieurs (cadres, trous)</label>
   <label><input type="checkbox" id="despill" checked> Corriger la frange des bords</label>
   <button id="relancer">Relancer le traitement</button>
   <span id="log"></span>
@@ -40,11 +44,12 @@
 const input     = document.getElementById("fichiers");
 const modeEl    = document.getElementById("mode");
 const tolEl     = document.getElementById("tol");
+const skipEl    = document.getElementById("skip");
+const trousEl   = document.getElementById("trous");
 const despillEl = document.getElementById("despill");
 const logEl     = document.getElementById("log");
 const galerie   = document.getElementById("galerie");
 
-// Tolérance conseillée selon le mode
 modeEl.addEventListener("change", () => {
   tolEl.value = modeEl.value === "blanc" ? 80 : 60;
 });
@@ -72,13 +77,15 @@ function lire(f) {
 }
 
 function traiterTout() {
-  const t = parseInt(tolEl.value, 10) || 0;
-  const mode = modeEl.value;
+  const t     = parseInt(tolEl.value, 10)  || 0;
+  const skip  = parseInt(skipEl.value, 10) || 0;
+  const trous = trousEl.checked;
+  const mode  = modeEl.value;
   logEl.textContent = "Traitement…";
-  originaux.forEach((o, i) => setTimeout(() => traiter(o, i, mode, t), i * 400));
+  originaux.forEach((o, i) => setTimeout(() => traiter(o, i, mode, t, skip, trous), i * 400));
 }
 
-function traiter(o, index, mode, t) {
+function traiter(o, index, mode, t, skip, trous) {
   const c = document.createElement("canvas");
   c.width  = o.image.naturalWidth;
   c.height = o.image.naturalHeight;
@@ -89,8 +96,10 @@ function traiter(o, index, mode, t) {
   const d  = im.data;
   const w  = c.width, h = c.height;
 
-  if (mode === "blanc") detourerBlanc(d, w, h, t);
+  if (mode === "blanc") detourerBlanc(d, w, h, t, trous, skip);
   else                  detourerMagenta(d, t);
+
+  nettoyerBande(d, w, h, skip);   // supprime le liseré grisé du pourtour
 
   if (despillEl.checked) {
     if (mode === "blanc") despillBlanc(d, w, h);
@@ -120,7 +129,7 @@ function traiter(o, index, mode, t) {
   }, "image/png");
 }
 
-/* ---------- Mode magenta (votre logique d'origine, inchangée) ---------- */
+/* ---------- Mode magenta ---------- */
 
 function detourerMagenta(d, t) {
   const rMin = 255 - t, gMax = t;
@@ -148,12 +157,19 @@ function despillMagenta(d, w, h) {
 
 /* ---------- Mode blanc ---------- */
 
-function detourerBlanc(d, w, h, t) {
-  const s = 255 - t;                       // fond si les 3 canaux >= s
+function detourerBlanc(d, w, h, t, trous, skip) {
+  const s = 255 - t;
   const estBlanc = i => d[i] >= s && d[i+1] >= s && d[i+2] >= s;
 
-  // Remplissage depuis les bords : seul le blanc CONNECTÉ au fond est retiré.
-  // Les blancs intérieurs (yeux, dents, reflets) restent intacts.
+  // Option « trous » : retire TOUT le blanc, y compris enfermé (cadres, yeux…)
+  if (trous) {
+    for (let i = 0; i < d.length; i += 4) {
+      if (estBlanc(i)) d[i+3] = 0;
+    }
+    return;
+  }
+
+  const m = Math.max(0, Math.min(skip, ((Math.min(w, h) >> 1) - 1)));
   const visite = new Uint8Array(w * h);
   const pile   = new Int32Array(w * h);
   let sommet = 0;
@@ -162,8 +178,15 @@ function detourerBlanc(d, w, h, t) {
     const p = y * w + x;
     if (!visite[p] && estBlanc(p * 4)) { visite[p] = 1; pile[sommet++] = p; }
   };
-  for (let x = 0; x < w; x++) { empiler(x, 0); empiler(x, h - 1); }
-  for (let y = 0; y < h; y++) { empiler(0, y); empiler(w - 1, y); }
+
+  if (m < 1) {   // comportement d'origine : départ aux bords exacts
+    for (let x = 0; x < w; x++) { empiler(x, 0); empiler(x, h - 1); }
+    for (let y = 0; y < h; y++) { empiler(0, y); empiler(w - 1, y); }
+  } else {       // départ sur un anneau intérieur : saute le liseré de bord
+    const x1 = w - 1 - m, y1 = h - 1 - m;
+    for (let x = m; x <= x1; x++) { empiler(x, m); empiler(x, y1); }
+    for (let y = m; y <= y1; y++) { empiler(m, y); empiler(x1, y); }
+  }
 
   while (sommet > 0) {
     const p = pile[--sommet];
@@ -176,9 +199,19 @@ function detourerBlanc(d, w, h, t) {
   }
 }
 
+function nettoyerBande(d, w, h, skip) {
+  const m = Math.max(0, Math.min(skip, ((Math.min(w, h) >> 1) - 1)));
+  if (m < 1) return;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (x >= m && x < w - m && y >= m && y < h - m) continue;
+      const i = (y * w + x) * 4;
+      if (Math.min(d[i], d[i+1], d[i+2]) >= 90) d[i+3] = 0;
+    }
+  }
+}
+
 function despillBlanc(d, w, h) {
-  // « Dé-mélange » les pixels de bord contaminés par le blanc :
-  // S = (C - (1-α)·255) / α, avec α estimé par le canal le plus sombre.
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
@@ -191,7 +224,7 @@ function despillBlanc(d, w, h) {
       if (!bord) continue;
 
       const m = Math.min(d[i], d[i+1], d[i+2]);
-      if (m < 25) continue;                // couleur déjà franche (contour noir…)
+      if (m < 25) continue;
       const a = Math.max(1 - m / 255, 0.25);
       for (let k = 0; k < 3; k++) {
         d[i + k] = (d[i + k] - (1 - a) * 255) / a;
