@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<title>Fond magenta → transparent → PNG</title>
+<title>Fond blanc ou magenta → transparent → PNG</title>
 <style>
   body   { font-family: system-ui, sans-serif; margin: 16px; max-width: 1100px; }
   .barre { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
@@ -19,12 +19,16 @@
 </head>
 <body>
 
-<h2>Fond magenta #FF00FF → transparent → PNG</h2>
+<h2>Fond blanc ou magenta → transparent → PNG</h2>
 <p>Tout se passe dans votre navigateur, sans serveur ni Photopea.</p>
 
 <div class="barre">
   <input type="file" id="fichiers" multiple accept="image/*">
-  <label>Tolérance <input type="number" id="tol" value="60" min="0" max="120" style="width:4em"></label>
+  <select id="mode">
+    <option value="blanc" selected>Fond blanc</option>
+    <option value="magenta">Fond magenta #FF00FF</option>
+  </select>
+  <label>Tolérance <input type="number" id="tol" value="80" min="0" max="150" style="width:4em"></label>
   <label><input type="checkbox" id="despill" checked> Corriger la frange des bords</label>
   <button id="relancer">Relancer le traitement</button>
   <span id="log"></span>
@@ -34,10 +38,16 @@
 
 <script>
 const input     = document.getElementById("fichiers");
+const modeEl    = document.getElementById("mode");
 const tolEl     = document.getElementById("tol");
 const despillEl = document.getElementById("despill");
 const logEl     = document.getElementById("log");
 const galerie   = document.getElementById("galerie");
+
+// Tolérance conseillée selon le mode
+modeEl.addEventListener("change", () => {
+  tolEl.value = modeEl.value === "blanc" ? 80 : 60;
+});
 
 let originaux = [];
 
@@ -63,11 +73,12 @@ function lire(f) {
 
 function traiterTout() {
   const t = parseInt(tolEl.value, 10) || 0;
+  const mode = modeEl.value;
   logEl.textContent = "Traitement…";
-  originaux.forEach((o, i) => setTimeout(() => traiter(o, i, t), i * 400));
+  originaux.forEach((o, i) => setTimeout(() => traiter(o, i, mode, t), i * 400));
 }
 
-function traiter(o, index, t) {
+function traiter(o, index, mode, t) {
   const c = document.createElement("canvas");
   c.width  = o.image.naturalWidth;
   c.height = o.image.naturalHeight;
@@ -76,28 +87,14 @@ function traiter(o, index, t) {
 
   const im = ctx.getImageData(0, 0, c.width, c.height);
   const d  = im.data;
-  const rMin = 255 - t, gMax = t;
+  const w  = c.width, h = c.height;
 
-  for (let i = 0; i < d.length; i += 4) {
-    if (d[i] >= rMin && d[i+2] >= rMin && d[i+1] <= gMax) d[i+3] = 0;
-  }
+  if (mode === "blanc") detourerBlanc(d, w, h, t);
+  else                  detourerMagenta(d, t);
 
   if (despillEl.checked) {
-    const w = c.width, h = c.height;
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const i = (y * w + x) * 4;
-        if (d[i+3] === 0) continue;
-        const bord =
-          d[i - 4     + 3] === 0 || d[i + 4     + 3] === 0 ||
-          d[i - w * 4 + 3] === 0 || d[i + w * 4 + 3] === 0;
-        if (bord && d[i] > d[i+1] + 30 && d[i+2] > d[i+1] + 30) {
-          const g = d[i+1];
-          d[i]   = g + (d[i]   - g) * 0.2;
-          d[i+2] = g + (d[i+2] - g) * 0.2;
-        }
-      }
-    }
+    if (mode === "blanc") despillBlanc(d, w, h);
+    else                  despillMagenta(d, w, h);
   }
 
   ctx.putImageData(im, 0, 0);
@@ -121,6 +118,86 @@ function traiter(o, index, t) {
     carte.querySelector(".nom").classList.add("ok");
     logEl.textContent = "Terminé ✔";
   }, "image/png");
+}
+
+/* ---------- Mode magenta (votre logique d'origine, inchangée) ---------- */
+
+function detourerMagenta(d, t) {
+  const rMin = 255 - t, gMax = t;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i] >= rMin && d[i+2] >= rMin && d[i+1] <= gMax) d[i+3] = 0;
+  }
+}
+
+function despillMagenta(d, w, h) {
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = (y * w + x) * 4;
+      if (d[i+3] === 0) continue;
+      const bord =
+        d[i - 4     + 3] === 0 || d[i + 4     + 3] === 0 ||
+        d[i - w * 4 + 3] === 0 || d[i + w * 4 + 3] === 0;
+      if (bord && d[i] > d[i+1] + 30 && d[i+2] > d[i+1] + 30) {
+        const g = d[i+1];
+        d[i]   = g + (d[i]   - g) * 0.2;
+        d[i+2] = g + (d[i+2] - g) * 0.2;
+      }
+    }
+  }
+}
+
+/* ---------- Mode blanc ---------- */
+
+function detourerBlanc(d, w, h, t) {
+  const s = 255 - t;                       // fond si les 3 canaux >= s
+  const estBlanc = i => d[i] >= s && d[i+1] >= s && d[i+2] >= s;
+
+  // Remplissage depuis les bords : seul le blanc CONNECTÉ au fond est retiré.
+  // Les blancs intérieurs (yeux, dents, reflets) restent intacts.
+  const visite = new Uint8Array(w * h);
+  const pile   = new Int32Array(w * h);
+  let sommet = 0;
+
+  const empiler = (x, y) => {
+    const p = y * w + x;
+    if (!visite[p] && estBlanc(p * 4)) { visite[p] = 1; pile[sommet++] = p; }
+  };
+  for (let x = 0; x < w; x++) { empiler(x, 0); empiler(x, h - 1); }
+  for (let y = 0; y < h; y++) { empiler(0, y); empiler(w - 1, y); }
+
+  while (sommet > 0) {
+    const p = pile[--sommet];
+    d[p * 4 + 3] = 0;
+    const x = p % w, y = (p / w) | 0;
+    if (x > 0)     empiler(x - 1, y);
+    if (x < w - 1) empiler(x + 1, y);
+    if (y > 0)     empiler(x, y - 1);
+    if (y < h - 1) empiler(x, y + 1);
+  }
+}
+
+function despillBlanc(d, w, h) {
+  // « Dé-mélange » les pixels de bord contaminés par le blanc :
+  // S = (C - (1-α)·255) / α, avec α estimé par le canal le plus sombre.
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      if (d[i+3] === 0) continue;
+      const bord =
+        (x > 0     && d[i - 4     + 3] === 0) ||
+        (x < w - 1 && d[i + 4     + 3] === 0) ||
+        (y > 0     && d[i - w * 4 + 3] === 0) ||
+        (y < h - 1 && d[i + w * 4 + 3] === 0);
+      if (!bord) continue;
+
+      const m = Math.min(d[i], d[i+1], d[i+2]);
+      if (m < 25) continue;                // couleur déjà franche (contour noir…)
+      const a = Math.max(1 - m / 255, 0.25);
+      for (let k = 0; k < 3; k++) {
+        d[i + k] = (d[i + k] - (1 - a) * 255) / a;
+      }
+    }
+  }
 }
 </script>
 </body>
